@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<head>
+<title>Personal Site of Rob Rhinehart</title>
+<link href='http://fonts.googleapis.com/css?family=Judson' rel='stylesheet' type='text/css'>
+<link href='/css/style.css' rel='stylesheet' type='text/css' />
+<script src='/js/jquery-1.7.min.js' type='text/javascript'></script>
+</head>
+<body>
+<div id='wrapper'>
+	<div id='header' class='white'>
+	<div id='header_left'>
+		<div><img id='portrait' src='http://www.gravatar.com/avatar/6931551e898672f3119826b013a1fd24?s=100' /></div>
+		<div><h2 style='margin-top:8px'>Rob Rhinehart</h2>
+		<hr>
+		A portrait of the engineer as a young man
+		</div>
+	</div>
+	<div id='seal_div'>
+		<a target='_blank' href='http://gatech.edu'><img id='seal' src='/images/gatech_seal.jpg' /></a>
+	</div>
+	</div>
+	<div class='white content'>
+		<h3>A Live WebGL Artificial Satellite Tracking System</h3>
+		<p>I got my amateur radio license today! The test was a breeze; just barely missed a perfect score. For the past several weeks though I have been interested in satellite communication. I plan to build my own antennas and transceivers but first I realized it can be hard to keep track of exactly where the satellites, or 'birds' are. There are some resources online but I figured I could do better, and it would be a great chance to learn WebGL (a subset of OpenGL) and get in to some awesome scientific computing and simulation (what I really like to do).
+		<p>The bad news is I got to start by porting FORTRAN IV written in 1980 to javascript. I thought about doing it server side in python but wanted to see how javascript handled the heavy mathematical lifting. So far it's run great in chrome and firefox! It's amazing how far javascript engines have come in just the past decade.
+		<p>The file <a href='/projects/sat/js/predict.js'>predict.js</a> takes a TLE <a href='http://en.wikipedia.org/wiki/Two-line_element_set'>(Two Line Element set)</a> and produces current position and velocity at an error of ~1km at epoch and an additional ~1-3km per day. It's amazing to be able to get such accurate simulation data from such little information, but it requires a very detailed physical model.
+		<p>I used the models detailed by Hoots and Roehrich <a href='http://www.celestrak.com/NORAD/documentation/spacetrk.pdf'>here (pdf)</a>. It's a lot to digest at once but T.S. Kelso has a great breakdown on his site <a href='celestrak.com/columns'>celestrak.com/columns</a> (originally pubished in Satellite Times from 1994-1998). The SGP4 models the earth as an oblate spheroid:</p>
+		<img src='fig-1.gif' />
+		<p>For now I have the SGP4 model implemented and the TLE of the ISS (International Space Station) tracking with a basic WebGL interface. The satellite for now is just a box. WebGL has not yet reached standardization and as such there is not a good, standards-compliant way to represent a complex model or make one in a common 3d CAD program. However, it is quite precise and everything except for the size of the satellite is to scale. You can see the sun and the moon in the distance. The moon rotates and revolves around the earth in real time. You can speed up the simulation though to see the effects better. The sun is also to scale but it's of course hard to get an idea of how large it really is from that distance. You can move the camera with your mouse and scroll wheel.
+		<p>Much more to come! For now you can check out the demo <a href='/projects/sat'>here</a>.
+		<p><a href=''>All sources on Github</a></p>
+	</div>
+</div>
+</body>
+</html>

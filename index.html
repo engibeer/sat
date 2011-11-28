@@ -1,0 +1,884 @@
+<html>
+
+<head>
+<title>WebGL Live Satellite Tracking</title>
+<meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+
+<script type="text/javascript" src="js/jquery-1.6.2.min.js"></script>
+<script type="text/javascript" src="js/glMatrix.min.js"></script>
+<script type="text/javascript" src="js/webgl-utils.js"></script>
+<script type="text/javascript" src="js/predict.js"></script>
+
+<script id="per-fragment-lighting-fs" type="x-shader/x-fragment">
+    #ifdef GL_ES
+    precision highp float;
+    #endif
+
+    varying vec2 vTextureCoord;
+    varying vec3 vTransformedNormal;
+    varying vec4 vPosition;
+	
+    uniform bool uUseColorMap;
+    uniform bool uUseSpecularMap;
+    uniform bool uUseLighting;
+
+    uniform vec3 uAmbientColor;
+
+    uniform vec3 uPointLightingLocation;
+	uniform vec3 uPointLightingColor;
+    uniform vec3 uPointLightingSpecularColor;
+    uniform vec3 uPointLightingDiffuseColor;
+
+    uniform sampler2D uColorMapSampler;
+    uniform sampler2D uSpecularMapSampler;
+
+    void main(void) {
+        vec3 lightWeighting;
+        if (!uUseLighting) {
+            lightWeighting = vec3(1.0, 1.0, 1.0);
+        } else {
+            vec3 lightDirection = normalize(uPointLightingLocation - vPosition.xyz);
+            vec3 normal = normalize(vTransformedNormal);
+
+            float specularLightWeighting = 0.0;
+            float shininess = 32.0;
+            if (uUseSpecularMap) {
+                shininess = texture2D(uSpecularMapSampler, vec2(vTextureCoord.s, vTextureCoord.t)).r * 255.0;
+            }
+            if (shininess < 255.0) {
+                vec3 eyeDirection = normalize(-vPosition.xyz);
+                vec3 reflectionDirection = reflect(-lightDirection, normal);
+
+                specularLightWeighting = pow(max(dot(reflectionDirection, eyeDirection), 0.0), shininess);
+            }
+
+            float diffuseLightWeighting = max(dot(normal, lightDirection), 0.0);
+            lightWeighting = uAmbientColor
+                + uPointLightingSpecularColor * specularLightWeighting
+                + uPointLightingDiffuseColor * diffuseLightWeighting;
+        }
+
+        vec4 fragmentColor;
+        if (uUseColorMap) {
+            fragmentColor = texture2D(uColorMapSampler, vec2(vTextureCoord.s, vTextureCoord.t));
+        } else {
+            fragmentColor = vec4(1.0, 1.0, 1.0, 1.0);
+        }
+        gl_FragColor = vec4(fragmentColor.rgb * lightWeighting, fragmentColor.a);
+    }
+</script>
+
+<script id="per-fragment-lighting-vs" type="x-shader/x-vertex">
+    attribute vec3 aVertexPosition;
+    attribute vec3 aVertexNormal;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uMVMatrix;
+    uniform mat4 uPMatrix;
+    uniform mat3 uNMatrix;
+
+    varying vec2 vTextureCoord;
+    varying vec3 vTransformedNormal;
+    varying vec4 vPosition;
+
+    void main(void) {
+        vPosition = uMVMatrix * vec4(aVertexPosition, 1.0);
+        gl_Position = uPMatrix * vPosition;
+        vTextureCoord = aTextureCoord;
+        vTransformedNormal = uNMatrix * aVertexNormal;
+    }
+</script>
+
+
+<script type="text/javascript">
+    // Globals
+	var gl;
+	var simulation_speed = 1;
+
+    function initGL(canvas) {
+        try {
+            gl = canvas.getContext("experimental-webgl");
+            gl.viewportWidth = canvas.width;
+            gl.viewportHeight = canvas.height;
+        } catch (e) {
+        }
+        if (!gl) {
+            alert("Could not initialise WebGL, sorry :-(");
+        }
+    }
+
+    function getShader(gl, id) {
+        var shaderScript = document.getElementById(id);
+        if (!shaderScript) {
+            return null;
+        }
+
+        var str = "";
+        var k = shaderScript.firstChild;
+        while (k) {
+            if (k.nodeType == 3) {
+                str += k.textContent;
+            }
+            k = k.nextSibling;
+        }
+
+        var shader;
+        if (shaderScript.type == "x-shader/x-fragment") {
+            shader = gl.createShader(gl.FRAGMENT_SHADER);
+        } else if (shaderScript.type == "x-shader/x-vertex") {
+            shader = gl.createShader(gl.VERTEX_SHADER);
+        } else {
+            return null;
+        }
+
+        gl.shaderSource(shader, str);
+        gl.compileShader(shader);
+
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            alert(gl.getShaderInfoLog(shader));
+            return null;
+        }
+
+        return shader;
+    }
+
+    var shaderProgram;
+
+    function initShaders() {
+        var fragmentShader = getShader(gl, "per-fragment-lighting-fs");
+        var vertexShader = getShader(gl, "per-fragment-lighting-vs");
+
+        shaderProgram = gl.createProgram();
+        gl.attachShader(shaderProgram, vertexShader);
+        gl.attachShader(shaderProgram, fragmentShader);
+        gl.linkProgram(shaderProgram);
+
+        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+            alert("Could not initialise shaders");
+        }
+
+        gl.useProgram(shaderProgram);
+
+        shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+        gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+
+        shaderProgram.vertexNormalAttribute = gl.getAttribLocation(shaderProgram, "aVertexNormal");
+        gl.enableVertexAttribArray(shaderProgram.vertexNormalAttribute);
+
+        shaderProgram.textureCoordAttribute = gl.getAttribLocation(shaderProgram, "aTextureCoord");
+        gl.enableVertexAttribArray(shaderProgram.textureCoordAttribute);
+
+        shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+        shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+        shaderProgram.nMatrixUniform = gl.getUniformLocation(shaderProgram, "uNMatrix");
+        shaderProgram.colorMapSamplerUniform = gl.getUniformLocation(shaderProgram, "uColorMapSampler");
+        shaderProgram.specularMapSamplerUniform = gl.getUniformLocation(shaderProgram, "uSpecularMapSampler");
+        shaderProgram.useColorMapUniform = gl.getUniformLocation(shaderProgram, "uUseColorMap");
+        shaderProgram.useSpecularMapUniform = gl.getUniformLocation(shaderProgram, "uUseSpecularMap");
+        shaderProgram.useLightingUniform = gl.getUniformLocation(shaderProgram, "uUseLighting");
+        shaderProgram.ambientColorUniform = gl.getUniformLocation(shaderProgram, "uAmbientColor");
+        shaderProgram.pointLightingLocationUniform = gl.getUniformLocation(shaderProgram, "uPointLightingLocation");
+        shaderProgram.pointLightingSpecularColorUniform = gl.getUniformLocation(shaderProgram, "uPointLightingSpecularColor");
+        shaderProgram.pointLightingDiffuseColorUniform = gl.getUniformLocation(shaderProgram, "uPointLightingDiffuseColor");
+    }
+
+    function handleLoadedTexture(texture) {
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texture.image);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.generateMipmap(gl.TEXTURE_2D);
+
+        gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    var earthColorMapTexture;
+    var earthSpecularMapTexture;
+
+	var moonColorMapTexture;
+	
+	var sunColorMapTexture;
+	
+	var sat1ColorMapTexture;
+	
+	//var sat1ColorMapTexture;
+	
+    function initTextures() {
+        earthColorMapTexture = gl.createTexture();
+        earthColorMapTexture.image = new Image();
+        earthColorMapTexture.image.onload = function () {
+            handleLoadedTexture(earthColorMapTexture)
+        }
+        earthColorMapTexture.image.src = "img/earthmap1k.jpg";
+
+        earthSpecularMapTexture = gl.createTexture();
+        earthSpecularMapTexture.image = new Image();
+        earthSpecularMapTexture.image.onload = function () {
+            handleLoadedTexture(earthSpecularMapTexture)
+        }
+        earthSpecularMapTexture.image.src = "img/earth-specular.gif";
+		
+		moonColorMapTexture = gl.createTexture();
+		moonColorMapTexture.image = new Image();
+        moonColorMapTexture.image.onload = function () {
+            handleLoadedTexture(moonColorMapTexture)
+        }
+        moonColorMapTexture.image.src = "img/moon.gif";
+		
+		sunColorMapTexture = gl.createTexture();
+		sunColorMapTexture.image = new Image();
+        sunColorMapTexture.image.onload = function () {
+            handleLoadedTexture(sunColorMapTexture)
+        }
+        sunColorMapTexture.image.src = "img/sunmap.jpg";
+		
+		satColorMapTexture = gl.createTexture();
+		satColorMapTexture.image = new Image();
+        satColorMapTexture.image.onload = function () {
+            handleLoadedTexture(moonColorMapTexture)
+        }
+        satColorMapTexture.image.src = "img/moon.gif";
+    }
+
+    var mvMatrix = mat4.create();
+    var mvMatrixStack = [];
+    var pMatrix = mat4.create();
+
+    function mvPushMatrix() {
+        var copy = mat4.create();
+        mat4.set(mvMatrix, copy);
+        mvMatrixStack.push(copy);
+    }
+
+    function mvPopMatrix() {
+        if (mvMatrixStack.length == 0) {
+            throw "Invalid popMatrix!";
+        }
+        mvMatrix = mvMatrixStack.pop();
+    }
+
+    function setMatrixUniforms() {
+        gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix);
+        gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix);
+
+        var normalMatrix = mat3.create();
+        mat4.toInverseMat3(mvMatrix, normalMatrix);
+        mat3.transpose(normalMatrix);
+        gl.uniformMatrix3fv(shaderProgram.nMatrixUniform, false, normalMatrix);
+    }
+
+    function degToRad(degrees) {
+        return degrees * Math.PI / 180;
+    }
+
+    var earthVertexNormalBuffer;
+    var earthVertexTextureCoordBuffer;
+    var earthVertexPositionBuffer;
+    var earthVertexIndexBuffer;
+	
+	var moonVertexNormalBuffer;
+    var moonVertexTextureCoordBuffer;
+    var moonVertexPositionBuffer;
+    var moonVertexIndexBuffer;
+	
+	var sunVertexNormalBuffer;
+    var sunVertexTextureCoordBuffer;
+    var sunVertexPositionBuffer;
+    var sunVertexIndexBuffer;
+	
+	var satVertexNormalBuffer;
+	var satVertexTextureCoordBuffer;
+    var satVertexPositionBuffer;
+    var satVertexIndexBuffer;
+	
+    function initBuffers() {
+	
+		// earth
+        var latitudeBands = 30;
+        var longitudeBands = 30;
+        var radius = 6.3781; // km * 1000
+
+        var vertexPositionData = [];
+        var normalData = [];
+        var textureCoordData = [];
+        for (var latNumber=0; latNumber <= latitudeBands; latNumber++) {
+            var theta = latNumber * Math.PI / latitudeBands;
+            var sinTheta = Math.sin(theta);
+            var cosTheta = Math.cos(theta);
+
+            for (var longNumber=0; longNumber <= longitudeBands; longNumber++) {
+                var phi = longNumber * 2 * Math.PI / longitudeBands;
+                var sinPhi = Math.sin(phi);
+                var cosPhi = Math.cos(phi);
+
+                var x = cosPhi * sinTheta;
+                var y = cosTheta;
+                var z = sinPhi * sinTheta;
+                var u = 1 - (longNumber / longitudeBands);
+                var v = 1 - (latNumber / latitudeBands);
+
+                normalData.push(x);
+                normalData.push(y);
+                normalData.push(z);
+                textureCoordData.push(u);
+                textureCoordData.push(v);
+                vertexPositionData.push(radius * x);
+                vertexPositionData.push(radius * y);
+                vertexPositionData.push(radius * z);
+            }
+        }
+
+        var indexData = [];
+        for (var latNumber=0; latNumber < latitudeBands; latNumber++) {
+            for (var longNumber=0; longNumber < longitudeBands; longNumber++) {
+                var first = (latNumber * (longitudeBands + 1)) + longNumber;
+                var second = first + longitudeBands + 1;
+                indexData.push(first);
+                indexData.push(second);
+                indexData.push(first + 1);
+
+                indexData.push(second);
+                indexData.push(second + 1);
+                indexData.push(first + 1);
+            }
+        }
+
+        earthVertexNormalBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, earthVertexNormalBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normalData), gl.STATIC_DRAW);
+        earthVertexNormalBuffer.itemSize = 3;
+        earthVertexNormalBuffer.numItems = normalData.length / 3;
+
+        earthVertexTextureCoordBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, earthVertexTextureCoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoordData), gl.STATIC_DRAW);
+        earthVertexTextureCoordBuffer.itemSize = 2;
+        earthVertexTextureCoordBuffer.numItems = textureCoordData.length / 2;
+
+        earthVertexPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, earthVertexPositionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexPositionData), gl.STATIC_DRAW);
+        earthVertexPositionBuffer.itemSize = 3;
+        earthVertexPositionBuffer.numItems = vertexPositionData.length / 3;
+
+        earthVertexIndexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, earthVertexIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STREAM_DRAW);
+        earthVertexIndexBuffer.itemSize = 1;
+        earthVertexIndexBuffer.numItems = indexData.length;
+		
+		// moon
+        radius = 1.7374; // km * 1000
+
+        var vertexPositionData = [];
+        var normalData = [];
+        var textureCoordData = [];
+        for (var latNumber=0; latNumber <= latitudeBands; latNumber++) {
+            var theta = latNumber * Math.PI / latitudeBands;
+            var sinTheta = Math.sin(theta);
+            var cosTheta = Math.cos(theta);
+
+            for (var longNumber=0; longNumber <= longitudeBands; longNumber++) {
+                var phi = longNumber * 2 * Math.PI / longitudeBands;
+                var sinPhi = Math.sin(phi);
+                var cosPhi = Math.cos(phi);
+
+                var x = cosPhi * sinTheta;
+                var y = cosTheta;
+                var z = sinPhi * sinTheta;
+                var u = 1 - (longNumber / longitudeBands);
+                var v = 1 - (latNumber / latitudeBands);
+
+                normalData.push(x);
+                normalData.push(y);
+                normalData.push(z);
+                textureCoordData.push(u);
+                textureCoordData.push(v);
+                vertexPositionData.push(radius * x);
+                vertexPositionData.push(radius * y);
+                vertexPositionData.push(radius * z);
+            }
+        }
+
+        var indexData = [];
+        for (var latNumber=0; latNumber < latitudeBands; latNumber++) {
+            for (var longNumber=0; longNumber < longitudeBands; longNumber++) {
+                var first = (latNumber * (longitudeBands + 1)) + longNumber;
+                var second = first + longitudeBands + 1;
+                indexData.push(first);
+                indexData.push(second);
+                indexData.push(first + 1);
+
+                indexData.push(second);
+                indexData.push(second + 1);
+                indexData.push(first + 1);
+            }
+        }
+
+        moonVertexNormalBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, moonVertexNormalBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normalData), gl.STATIC_DRAW);
+        moonVertexNormalBuffer.itemSize = 3;
+        moonVertexNormalBuffer.numItems = normalData.length / 3;
+
+        moonVertexTextureCoordBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, moonVertexTextureCoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoordData), gl.STATIC_DRAW);
+        moonVertexTextureCoordBuffer.itemSize = 2;
+        moonVertexTextureCoordBuffer.numItems = textureCoordData.length / 2;
+
+        moonVertexPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, moonVertexPositionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexPositionData), gl.STATIC_DRAW);
+        moonVertexPositionBuffer.itemSize = 3;
+        moonVertexPositionBuffer.numItems = vertexPositionData.length / 3;
+
+        moonVertexIndexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, moonVertexIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STREAM_DRAW);
+        moonVertexIndexBuffer.itemSize = 1;
+        moonVertexIndexBuffer.numItems = indexData.length;
+		
+		// sun
+        radius = 695.500; // km * 1000
+
+        var vertexPositionData = [];
+        var normalData = [];
+        var textureCoordData = [];
+        for (var latNumber=0; latNumber <= latitudeBands; latNumber++) {
+            var theta = latNumber * Math.PI / latitudeBands;
+            var sinTheta = Math.sin(theta);
+            var cosTheta = Math.cos(theta);
+
+            for (var longNumber=0; longNumber <= longitudeBands; longNumber++) {
+                var phi = longNumber * 2 * Math.PI / longitudeBands;
+                var sinPhi = Math.sin(phi);
+                var cosPhi = Math.cos(phi);
+
+                var x = cosPhi * sinTheta;
+                var y = cosTheta;
+                var z = sinPhi * sinTheta;
+                var u = 1 - (longNumber / longitudeBands);
+                var v = 1 - (latNumber / latitudeBands);
+
+                normalData.push(x);
+                normalData.push(y);
+                normalData.push(z);
+                textureCoordData.push(u);
+                textureCoordData.push(v);
+                vertexPositionData.push(radius * x);
+                vertexPositionData.push(radius * y);
+                vertexPositionData.push(radius * z);
+            }
+        }
+
+        var indexData = [];
+        for (var latNumber=0; latNumber < latitudeBands; latNumber++) {
+            for (var longNumber=0; longNumber < longitudeBands; longNumber++) {
+                var first = (latNumber * (longitudeBands + 1)) + longNumber;
+                var second = first + longitudeBands + 1;
+                indexData.push(first);
+                indexData.push(second);
+                indexData.push(first + 1);
+
+                indexData.push(second);
+                indexData.push(second + 1);
+                indexData.push(first + 1);
+            }
+        }
+
+        sunVertexNormalBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, sunVertexNormalBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normalData), gl.STATIC_DRAW);
+        sunVertexNormalBuffer.itemSize = 3;
+        sunVertexNormalBuffer.numItems = normalData.length / 3;
+
+        sunVertexTextureCoordBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, sunVertexTextureCoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoordData), gl.STATIC_DRAW);
+        sunVertexTextureCoordBuffer.itemSize = 2;
+        sunVertexTextureCoordBuffer.numItems = textureCoordData.length / 2;
+
+        sunVertexPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, sunVertexPositionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexPositionData), gl.STATIC_DRAW);
+        sunVertexPositionBuffer.itemSize = 3;
+        sunVertexPositionBuffer.numItems = vertexPositionData.length / 3;
+
+        sunVertexIndexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sunVertexIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STREAM_DRAW);
+        sunVertexIndexBuffer.itemSize = 1;
+        sunVertexIndexBuffer.numItems = indexData.length;
+		
+		// satellite 1
+        satVertexPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, satVertexPositionBuffer);
+		var cube_size = .2;
+        vertices = [
+            // Front face
+            -cube_size, -cube_size,  cube_size,
+             cube_size, -cube_size,  cube_size,
+             cube_size,  cube_size,  cube_size,
+            -cube_size,  cube_size,  cube_size,
+
+            // Back face
+            -cube_size, -cube_size, -cube_size,
+            -cube_size,  cube_size, -cube_size,
+             cube_size,  cube_size, -cube_size,
+             cube_size, -cube_size, -cube_size,
+
+            // Top face
+            -cube_size,  cube_size, -cube_size,
+            -cube_size,  cube_size,  cube_size,
+             cube_size,  cube_size,  cube_size,
+             cube_size,  cube_size, -cube_size,
+
+            // Bottom face
+            -cube_size, -cube_size, -cube_size,
+             cube_size, -cube_size, -cube_size,
+             cube_size, -cube_size,  cube_size,
+            -cube_size, -cube_size,  cube_size,
+
+            // Right face
+             cube_size, -cube_size, -cube_size,
+             cube_size,  cube_size, -cube_size,
+             cube_size,  cube_size,  cube_size,
+             cube_size, -cube_size,  cube_size,
+
+            // Left face
+            -cube_size, -cube_size, -cube_size,
+            -cube_size, -cube_size,  cube_size,
+            -cube_size,  cube_size,  cube_size,
+            -cube_size,  cube_size, -cube_size
+        ];
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+        satVertexPositionBuffer.itemSize = 3;
+        satVertexPositionBuffer.numItems = 24;
+    }
+	
+	var cameraY = 0;
+	var cameraX = 0;
+
+    var earthAngle = 0;
+	
+	// moon is 356.400 Mm from earth (perigee)
+	var moonDistance = 356.4;
+	var moonRotateAngle = 180;
+	var moonTheta = 0;
+	
+	var zoom = -80;
+	var maxZoom = 200000.0;
+
+    function drawScene() {
+        gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, maxZoom, pMatrix);
+		
+		mat4.identity(mvMatrix);
+				
+        var useColorMap = document.getElementById("color-map").checked;
+        gl.uniform1i(shaderProgram.useColorMapUniform, useColorMap);
+
+        var useSpecularMap = document.getElementById("specular-map").checked;
+        gl.uniform1i(shaderProgram.useSpecularMapUniform, useSpecularMap);
+
+        var lighting = document.getElementById("lighting").checked;
+        gl.uniform1i(shaderProgram.useLightingUniform, lighting);
+		
+		mvPushMatrix();
+		
+		mat4.rotate(mvMatrix, degToRad(-cameraY), [1, 0, 0]);
+		mat4.rotate(mvMatrix, degToRad(-cameraX), [0, 1, 0]);
+		
+        if (lighting) {
+            gl.uniform3f(
+                shaderProgram.ambientColorUniform, .01, .01, .01
+            );
+
+            gl.uniform3f(
+                shaderProgram.pointLightingLocationUniform, 0, 0, 200
+            );
+			
+			gl.uniform3f(
+				shaderProgram.pointLightingColorUniform, 1, .1, .1
+			);
+
+            gl.uniform3f(
+                shaderProgram.pointLightingSpecularColorUniform, .1, .1, .1
+			);
+
+            gl.uniform3f(
+                shaderProgram.pointLightingDiffuseColorUniform, 2, 2, 2
+            );
+        }
+		
+		mvPopMatrix();
+
+		// global zoom
+        mat4.translate(mvMatrix, [0, 0, zoom]);
+		
+		// camera y
+		mat4.rotate(mvMatrix, degToRad(cameraY), [1, 0, 0]);
+		mat4.rotate(mvMatrix, degToRad(cameraX), [0, 1, 0]);
+				
+		// draw earth
+		mvPushMatrix();
+		
+        mat4.rotate(mvMatrix, degToRad(23.4), [1, 0, -1]);
+		mat4.rotate(mvMatrix, degToRad(360 * fraction_of_day), [0, 1, 0]);
+        mat4.rotate(mvMatrix, degToRad(earthAngle), [0, 1, 0]);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, earthColorMapTexture);
+        gl.uniform1i(shaderProgram.colorMapSamplerUniform, 0);
+
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, earthSpecularMapTexture);
+        gl.uniform1i(shaderProgram.specularMapSamplerUniform, 1);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, earthVertexPositionBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, earthVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, earthVertexTextureCoordBuffer);
+        gl.vertexAttribPointer(shaderProgram.textureCoordAttribute, earthVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, earthVertexNormalBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, earthVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, earthVertexIndexBuffer);
+        setMatrixUniforms();
+        gl.drawElements(gl.TRIANGLES, earthVertexIndexBuffer.numItems, gl.UNSIGNED_SHORT, 0);
+		
+		mvPopMatrix();
+		
+		// draw sun
+		mvPushMatrix();
+		// 1AU = 149598.0 Mm
+		mat4.translate(mvMatrix, [-200, 0, -149598.0]);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, sunColorMapTexture);
+        gl.uniform1i(shaderProgram.colorMapSamplerUniform, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, sunVertexPositionBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, sunVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, sunVertexTextureCoordBuffer);
+        gl.vertexAttribPointer(shaderProgram.textureCoordAttribute, sunVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, sunVertexNormalBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, sunVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sunVertexIndexBuffer);
+        setMatrixUniforms();
+        gl.drawElements(gl.TRIANGLES, sunVertexIndexBuffer.numItems, gl.UNSIGNED_SHORT, 0);
+		
+		mvPopMatrix();
+		
+		// draw moon
+		
+		mvPushMatrix();
+		
+		var moon_x = Math.cos(degToRad(moonTheta)) *  moonDistance;
+		var moon_z = Math.sin(degToRad(moonTheta)) *  moonDistance;
+		mat4.translate(mvMatrix, [moon_x, 0, moon_z]);
+		mat4.rotate(mvMatrix, degToRad(moonRotateAngle), [0, 1, 0]);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, moonColorMapTexture);
+        gl.uniform1i(shaderProgram.colorMapSamplerUniform, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, moonVertexPositionBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, moonVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, moonVertexTextureCoordBuffer);
+        gl.vertexAttribPointer(shaderProgram.textureCoordAttribute, moonVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, moonVertexNormalBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, moonVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, moonVertexIndexBuffer);
+        setMatrixUniforms();
+        gl.drawElements(gl.TRIANGLES, moonVertexIndexBuffer.numItems, gl.UNSIGNED_SHORT, 0);
+		
+		mvPopMatrix();
+		
+		// draw sat1 (ISS for now)
+		mvPushMatrix();
+		
+		pos_vel = calc_ISS()
+		var position = pos_vel.pos;
+		var velocity = pos_vel.vel;
+		
+		// cartesian to polar conversion here
+		var altitude = Math.sqrt(Math.pow(position.x, 2) + Math.pow(position.y, 2) + Math.pow(position.z, 2));
+		var longitude = Math.atan(Math.sqrt(Math.pow(position.x, 2) + Math.pow(position.y, 2)) / position.z) * (180 / Math.PI);
+		var latitude = Math.atan(position.y / position.x) * (180 / Math.PI);
+		var vector_vel = Math.sqrt(Math.pow(velocity.x, 2) + Math.pow(velocity.y, 2) + Math.pow(velocity.z, 2));
+		// radius of earth = 6378.1 km
+		$('#alt').html(altitude - 6378.1);
+		$('#long').html(longitude);
+		$('#lat').html(latitude);
+		$('#speed').html(vector_vel);
+		
+		var sat_x = position.x;
+		var sat_y = position.y;
+		var sat_z = position.z;
+		//console.log(sat_z);
+		
+		mat4.translate(mvMatrix, [sat_x / 1000, sat_y / 1000, sat_z / 1000]);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, satVertexPositionBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, satVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        setMatrixUniforms();
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, satVertexPositionBuffer.numItems);
+    }
+
+    var lastTime = 0;
+
+    function animate() {
+        var timeNow = new Date().getTime();
+		var earthStep = 1.85185185e-7 * simulation_speed;
+		// a moon day (monday?) is 27.3 earth days
+		var moonStep = earthStep / 27.3;
+		// a 'synodic month' is 29.5 days
+		var moonThetaStep = -earthStep / 29.5;
+        if (lastTime != 0) {
+            var elapsed = timeNow - lastTime;
+			earthStep = simulation_speed / ( ( 24 * 60 * 60 ) / (elapsed / 1000) );
+            earthAngle += earthStep * elapsed;
+			moonRotateAngle += moonStep * elapsed;
+			
+			moonTheta += moonThetaStep * elapsed;
+			if(moonTheta >= 360){
+				moonTheta -= 360;
+			}
+        }
+        lastTime = timeNow;
+    }
+
+    function tick() {
+		simulation_speed = $('#range').val();
+        requestAnimFrame(tick);
+        drawScene();
+        animate();
+    }
+
+    function webGLStart() {
+        var canvas = document.getElementById("sat-canvas");
+        initGL(canvas);
+        initShaders();
+        initBuffers();
+        initTextures();
+		var now = new Date();
+		var UtcSecond = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
+		fraction_of_day = UtcSecond / (3600 * 24);
+		earthAngle = 360 * fraction_of_day;
+
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+        gl.enable(gl.DEPTH_TEST);
+
+        tick();
+    }
+	
+	// using jquery for event binding convenience
+	$(document).ready(function(){
+		//$('canvas').css('cursor', 'none');
+	
+		$('canvas').mousewheel(function(e){
+			e.preventDefault();
+			var up = e.wheelDelta > 0;
+			var down = e.wheelDelta < 0;
+			if(up){
+				if(zoom < -200){
+					zoom += 20;
+				}else{
+					zoom += 2;
+				}
+			}else if(down){
+				if(zoom < -200){
+					zoom -= 20;
+				}else{
+					zoom -= 2;
+				}
+			}
+		});
+		
+		var recording = false;
+		var lastMouseX;
+		var lastMouseY;
+		var dx;
+		var dy;
+		var last_dx;
+		var last_dy;
+		var went_up = false;
+		var went_left = false;
+		$('canvas').mousedown(function(e){
+			recording = true;
+			lastMouseX = e.clientX;
+			lastMouseY = e.clientY;
+			dx = 0; 
+			last_dx = 0;
+			dy = 0;
+			last_dy = 0;
+		}).mouseup(function(e){
+			recording = false;
+		}).mousemove(function(e){
+			if(recording){
+				dx = (e.clientX - lastMouseX) / 10;
+				dy = (e.clientY - lastMouseY) / 10;
+				cameraX += dx;
+				cameraY += dy;
+				// this effectively resets the axis if mouse reverses direction
+				if(dy > last_dy && !went_up){ 
+					went_up = true; 
+					lastMouseY = e.clientY;
+				}
+				if(dy < last_dy && went_up){ 
+					went_up = false;
+					lastMouseY = e.clientY;
+				}
+				if(dx > last_dx && !went_left){ 
+					went_left = true; 
+					lastMouseX = e.clientX;
+				}
+				if(dx < last_dx && went_left){ 
+					went_left = false;
+					lastMouseX = e.clientX;
+				}
+				last_dx = dx;
+				last_dy = dy;
+			}
+		});
+	});
+</script>
+
+</head>
+
+<body onload="webGLStart();">
+
+    <canvas id="sat-canvas" style="border: none;" width="1200" height="800"></canvas><br>
+	<hr>
+	<h3>International Space Station (ZARYA):</h3>
+	Lat: <span id='lat'>0</span><br>
+	Long: <span id='long'>0</span><br>
+	Alt: <span id='alt'>0</span> km<br>
+	Speed: <span id='speed'>0</span> km/s<br>
+	<hr>
+	Simulation Speed: (does not affect satellites)<br>
+	<input id='range' type="range" min="1" max="500000" value="1" step="5" /><br><br>
+    <input type="checkbox" id="color-map" checked /> Use color map<br>
+    <input type="checkbox" id="specular-map" checked /> Use specular map<br>
+    <input type="checkbox" id="lighting" checked /> Use lighting<br>
+    Earth texture courtesy of <a href="http://www.esa.int/esaEO/SEMGSY2IU7E_index_0.html">the European Space Agency/Envisat</a>.<br/>
+    <br/>
+</body>
+
+</html>
